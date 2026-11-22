@@ -95,8 +95,14 @@ def _open_target_chat(chat_name: str, tool: str) -> dict[str, Any] | None:
     """
     Make sure ``chat_name`` is the open chat. Returns None on success or an
     error dict (candidates / mismatch) that the tool should return as is.
+
+    The common path is fully background: read the current title through AX and
+    do not activate WeChat. Only an actual chat switch falls back to the
+    foreground search flow, because WeChat 4.x ignores background clicks on
+    session rows.
     """
-    current_chat = get_current_chat_name()
+    ax_app = get_wechat_ax_app(activate=False)
+    current_chat = get_current_chat_name(ax_app)
     same_chat = chat_names_match(current_chat, chat_name)
     logger.info(
         "Current chat title=%r, target=%r, same_chat=%s",
@@ -144,7 +150,9 @@ def fetch_messages_by_chat(
             if problem is not None:
                 return [_with_warnings(problem)]
 
-            messages: list[ChatMessage] = fetch_recent_messages(last_n=last_n)
+            messages: list[ChatMessage] = fetch_recent_messages(
+                last_n=last_n, background=True
+            )
             result = [msg.to_dict() for msg in messages]
             logger.info("Returning %d messages for chat=%s", len(result), chat_name)
             warnings = version_warnings()

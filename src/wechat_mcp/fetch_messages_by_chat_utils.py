@@ -7,11 +7,16 @@ from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
 from ApplicationServices import (
+    AXUIElementPerformAction,
+    AXUIElementSetAttributeValue,
     kAXChildrenAttribute,
+    kAXFocusedAttribute,
     kAXIdentifierAttribute,
     kAXListRole,
+    kAXRaiseAction,
     kAXTitleAttribute,
 )
+from Quartz import CGEventCreateKeyboardEvent, CGEventPostToPid
 from PIL import Image
 
 from .capture import (
@@ -46,6 +51,11 @@ ID_CHAT_COUNT_LABEL = "current_chat_count_label"
 MESSAGE_LIST_TITLES = ("Messages", "消息")
 
 SenderLabel = Literal["ME", "OTHER", "SYSTEM", "UNKNOWN"]
+
+KEYCODE_HOME = 115
+KEYCODE_END = 119
+KEYCODE_PAGE_UP = 116
+KEYCODE_PAGE_DOWN = 121
 
 # Pixels ignored at the edges of the message list when measuring bubbles.
 SCROLLBAR_MARGIN_LEFT = 2
@@ -342,6 +352,10 @@ def message_kind(text: str, sender: SenderLabel) -> MessageKind:
     if sender == "SYSTEM":
         return "system"
     stripped = text.strip()
+    if re.match(r"^(?:Audio|语音)\s*\d*[\"”]?\s*(?:sec|秒)", stripped, re.IGNORECASE):
+        return "voice"
+    if stripped.startswith("Voice Call"):
+        return "voice"
     if stripped in _EXACT_KINDS:
         return _EXACT_KINDS[stripped]
     for prefix, kind in _WORD_PREFIXES:
@@ -398,9 +412,78 @@ class ChatMessage:
     text: str
     kind: MessageKind = "text"
     sender_name: str | None = None
+    voice_duration: int | None = None
+    voice_transcript: str | None = None
+    voice_transcription_status: str | None = None
+    sticker_label: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def parse_voice_text(text: str) -> tuple[int | None, str | None, str | None]:
+    """Return (duration_seconds, transcript, status) for a WeChat voice row.
+
+    WeChat 4.x puts its own transcription in the same accessibility text node
+    as the duration::
+
+        Audio16"sec不会的吧？...
+        Audio16"secUnplayed
+        语音8"秒其实，我25年初在西安…
+
+    A duration without a remainder means WeChat has not transcribed that
+    voice. We must never infer its content.
+    """
+    m = re.match(
+        r'^\s*(?:Audio|语音)\s*(?P<duration>\d+)?["”]?\s*(?:sec|秒)?\s*(?:Unplayed)?\s*(?P<rest>.*)$',
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not m:
+        return None, None, None
+    duration = int(m.group("duration")) if m.group("duration") else None
+    rest = m.group("rest").strip()
+    if rest:
+        return duration, rest, "transcribed"
+    return duration, None, "untranscribed"
+
+
+def parse_sticker_label(text: str) -> str | None:
+    """Extract the label WeChat exposes for a sticker, if any."""
+    m = re.search(r'\[([^\]]+)\]\s*$', text)
+    return m.group(1).strip() if m else None
+
+
+def _decorate_message(message: ChatMessage) -> ChatMessage:
+    if message.kind == "voice":
+        duration, transcript, status = parse_voice_text(message.text)
+        message.voice_duration = duration
+        message.voice_transcript = transcript
+        message.voice_transcription_status = status
+    elif message.kind == "sticker":
+        message.sticker_label = parse_sticker_label(message.text)
+    return message
+
+
+def _visible_rows(msg_list: Any) -> list[ChatMessage]:
+    """Read the currently rendered rows without screenshots or activation."""
+    visible: list[ChatMessage] = []
+    for child in ax_get(msg_list, kAXChildrenAttribute) or []:
+        text = element_text(child)
+        if not text:
+            continue
+        identifier = ax_get(child, kAXIdentifierAttribute)
+        sender: SenderLabel = "SYSTEM" if identifier != ID_MESSAGE_BUBBLE else "UNKNOWN"
+        visible.append(
+            _decorate_message(
+                ChatMessage(
+                    sender=sender,
+                    text=str(text),
+                    kind=message_kind(str(text), sender),
+                )
+            )
+        )
+    return visible
 
 
 def _collect_visible_messages(
@@ -440,11 +523,13 @@ def _collect_visible_messages(
                 else:
                     sender_name = chat_name
         visible.append(
-            ChatMessage(
-                sender=sender,
-                text=str(text),
-                kind=message_kind(str(text), sender),
-                sender_name=sender_name,
+            _decorate_message(
+                ChatMessage(
+                    sender=sender,
+                    text=str(text),
+                    kind=message_kind(str(text), sender),
+                    sender_name=sender_name,
+                )
             )
         )
     return visible
@@ -503,10 +588,81 @@ def preview_matches_text(preview: str, bubble_text: str) -> bool:
     return p[-tail:] in b or b[-tail:] in p or b[:10] in p
 
 
+def _press_key(keycode: int, wait: float = 0.35) -> None:
+    pid = get_wechat_pid()
+    for down in (True, False):
+        event = CGEventCreateKeyboardEvent(None, keycode, down)
+        CGEventPostToPid(pid, event)
+    time.sleep(wait)
+
+
+def _focus_message_list(ax_app: Any, msg_list: Any) -> None:
+    """Focus the list so PID-targeted navigation keys work in the background."""
+    # Raising the main window via AX makes its child list focusable without
+    # activating WeChat. Raising the list alone is ignored in the background.
+    AXUIElementPerformAction(get_main_window(ax_app), kAXRaiseAction)
+    time.sleep(0.15)
+    AXUIElementPerformAction(msg_list, kAXRaiseAction)
+    AXUIElementSetAttributeValue(msg_list, kAXFocusedAttribute, True)
+    time.sleep(0.15)
+
+
+def fetch_recent_messages_background(
+    last_n: int = 100,
+    max_pages: int = 500,
+) -> list[ChatMessage]:
+    """Read the last N rows without activating WeChat or taking screenshots.
+
+    WeChat 4.2 virtualises the message list. Focusing the AX list and posting
+    Home/End/PageUp keys directly to the WeChat process moves it reliably even
+    while another app owns the foreground. Sender classification is left as
+    UNKNOWN because the screenshot heuristic requires a visible window; voice
+    transcription is read from WeChat's own accessibility text.
+    """
+    ax_app = get_wechat_ax_app(activate=False)
+    msg_list = get_messages_list(ax_app)
+    _focus_message_list(ax_app, msg_list)
+
+    _press_key(KEYCODE_END, wait=0.5)
+    messages = _visible_rows(msg_list)
+    if not messages:
+        return []
+
+    pages = 0
+    stable = 0
+    while len(messages) < last_n and pages < max_pages:
+        _press_key(KEYCODE_PAGE_UP, wait=0.45)
+        visible = _visible_rows(msg_list)
+        pages += 1
+        if not visible:
+            break
+        new_older = _merge_older(visible, messages)
+        if new_older:
+            messages = new_older + messages
+            stable = 0
+        else:
+            stable += 1
+            if stable >= 4:
+                break
+        if stable >= 3:
+            break
+
+    if len(messages) > last_n:
+        messages = messages[-last_n:]
+    logger.info(
+        "Fetched %d rows in background (requested last_n=%d, pages=%d)",
+        len(messages),
+        last_n,
+        pages,
+    )
+    return messages
+
+
 def fetch_recent_messages(
     last_n: int = 100,
     max_scrolls: int | None = None,
     allow_background: bool = True,
+    background: bool = False,
 ) -> list[ChatMessage]:
     """
     Fetch the true last N rows from the currently open chat, even when the
@@ -523,6 +679,9 @@ def fetch_recent_messages(
       window; timestamps / notices are marked SYSTEM. In group chats the
       sender name above incoming bubbles is recovered with OCR.
     """
+    if background:
+        return fetch_recent_messages_background(last_n=last_n)
+
     ax_app = get_wechat_ax_app(activate=False)
     msg_list = get_messages_list(ax_app)
     chat_name = get_current_chat_name(ax_app)

@@ -18,12 +18,16 @@ def test_render_messages_text():
         {"sender": "SYSTEM", "text": "16:10", "kind": "system", "sender_name": None},
         {"sender": "OTHER", "text": "hi", "kind": "text", "sender_name": "Bob"},
         {"sender": "ME", "text": "File\nreport.pdf", "kind": "file", "sender_name": None},
+        {"sender": "OTHER", "text": 'Audio16"sec你好', "kind": "voice", "sender_name": "Bob", "voice_duration": 16, "voice_transcript": "你好"},
+        {"sender": "OTHER", "text": "Animated Stickers", "kind": "sticker", "sender_name": "Bob", "sticker_label": None},
     ]
     out = cli._render_text("fetch", rows)
     assert "! WeChat 9.9 is newer" in out
     assert "--- 16:10" in out
     assert "[Bob] hi" in out
     assert "[me] [file] File | report.pdf" in out
+    assert "[Bob] [voice 16s] 你好" in out
+    assert "[Bob] [sticker] [无文字标签]" in out
 
 
 def test_render_chats_and_errors():

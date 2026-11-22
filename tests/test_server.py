@@ -13,7 +13,7 @@ def _quiet_focus(monkeypatch):
 
 def test_reply_does_not_send_when_chat_cannot_be_opened(monkeypatch):
     _quiet_focus(monkeypatch)
-    monkeypatch.setattr(mcp_server, "get_current_chat_name", lambda: "Other")
+    monkeypatch.setattr(mcp_server, "get_current_chat_name", lambda ax_app=None: "Other")
     monkeypatch.setattr(
         mcp_server,
         "open_chat_for_contact",
@@ -28,7 +28,7 @@ def test_reply_does_not_send_when_chat_cannot_be_opened(monkeypatch):
 
 def test_reply_sends_with_expected_chat_guard(monkeypatch):
     _quiet_focus(monkeypatch)
-    monkeypatch.setattr(mcp_server, "get_current_chat_name", lambda: "Alice")
+    monkeypatch.setattr(mcp_server, "get_current_chat_name", lambda ax_app=None: "Alice")
     calls = []
 
     def fake_send(text, expected_chat=None):
@@ -43,7 +43,7 @@ def test_reply_sends_with_expected_chat_guard(monkeypatch):
 
 def test_reply_error_carries_diagnostics(monkeypatch):
     _quiet_focus(monkeypatch)
-    monkeypatch.setattr(mcp_server, "get_current_chat_name", lambda: "Alice")
+    monkeypatch.setattr(mcp_server, "get_current_chat_name", lambda ax_app=None: "Alice")
 
     def boom(text, expected_chat=None):
         raise RuntimeError("Refusing to send: the open chat is 'Bob', not 'Alice'")
@@ -58,11 +58,11 @@ def test_reply_error_carries_diagnostics(monkeypatch):
 def test_fetch_prepends_version_warnings(monkeypatch):
     _quiet_focus(monkeypatch)
     monkeypatch.setattr(mcp_server, "version_warnings", lambda: ["WeChat 9.9 is newer"])
-    monkeypatch.setattr(mcp_server, "get_current_chat_name", lambda: "Alice")
+    monkeypatch.setattr(mcp_server, "get_current_chat_name", lambda ax_app=None: "Alice")
     monkeypatch.setattr(
         mcp_server,
         "fetch_recent_messages",
-        lambda last_n: [mcp_server.ChatMessage("ME", "hi")],
+        lambda last_n, background=False: [mcp_server.ChatMessage("ME", "hi")],
     )
     rows = mcp_server.fetch_messages_by_chat("Alice", last_n=1)
     assert rows[0] == {"warnings": ["WeChat 9.9 is newer"]}

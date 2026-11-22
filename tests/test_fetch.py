@@ -72,12 +72,28 @@ def test_merge_older_uses_longest_overlap():
     assert len(fm._merge_older(visible, [fm.ChatMessage("ME", "z")])) == 3
 
 
+def test_voice_parsing_and_untranscribed_marker():
+    duration, transcript, status = fm.parse_voice_text('Audio16"sec不会的吧？脚弓是平的。')
+    assert duration == 16 and transcript == "不会的吧？脚弓是平的。" and status == "transcribed"
+    duration, transcript, status = fm.parse_voice_text('Audio3"secUnplayed')
+    assert duration == 3 and transcript is None and status == "untranscribed"
+    duration, transcript, status = fm.parse_voice_text('语音8"秒其实，我25年初在西安…')
+    assert duration == 8 and transcript == "其实，我25年初在西安…" and status == "transcribed"
+
+
+def test_sticker_label_parsing():
+    assert fm.parse_sticker_label("Animated Stickers [哈哈]") == "哈哈"
+    assert fm.parse_sticker_label("Animated Stickers") is None
+
+
 def test_message_kind_detection():
     assert fm.message_kind("File\nreport.pdf\n2.1M\n微信电脑版", "OTHER") == "file"
     assert fm.message_kind("Image", "OTHER") == "image"
     assert fm.message_kind("Video", "ME") == "video"
     assert fm.message_kind("Animated Stickers [Thank You]", "OTHER") == "sticker"
     assert fm.message_kind("Voice CallDuration: 00:23", "OTHER") == "voice"
+    assert fm.message_kind('Audio16"sec不会的吧？', "OTHER") == "voice"
+    assert fm.message_kind('语音8"秒其实，我25年初在西安…', "OTHER") == "voice"
     assert fm.message_kind("[Sticker] Yes", "OTHER") == "sticker"
     assert fm.message_kind("ChannelsWHEAT-Mia", "ME") == "link"
     assert fm.message_kind("https://example.com/x", "ME") == "link"

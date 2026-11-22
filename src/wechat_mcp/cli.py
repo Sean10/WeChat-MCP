@@ -60,7 +60,16 @@ def _render_text(command: str, result: Any) -> str:
             who = row.get("sender_name") or ("me" if sender == "ME" else sender.lower())
             kind = row.get("kind", "text")
             text = row.get("text", "").replace("\n", " | ")
-            suffix = f" [{kind}]" if kind not in ("text",) else ""
+            if kind == "voice":
+                duration = row.get("voice_duration")
+                transcript = row.get("voice_transcript")
+                text = transcript or "[未转写]"
+                suffix = f" [voice {duration}s]" if duration is not None else " [voice]"
+            elif kind == "sticker":
+                text = row.get("sticker_label") or "[无文字标签]"
+                suffix = " [sticker]"
+            else:
+                suffix = f" [{kind}]" if kind not in ("text",) else ""
             lines.append(f"[{who}]{suffix} {text}")
         return "\n".join(lines)
 
